@@ -4,8 +4,37 @@ const cors = require('cors');
 const port = process.env.PORT || 3000;
 const { MongoClient, ServerApiVersion } = require('mongodb');
 require('dotenv').config();
+
+// stripe setup
+const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 // midleweare
 app.use(cors());
+
+// webhook api
+app.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+    const sig = req.headers['stripe-signature'];
+    let event;
+
+    try {
+        event = stripe.webhooks.constructEvent(req.body, sig, process.env.WEBHOOK_SIGNING_SECRET_KEY);
+    } catch (err) {
+        return res.status(400).send(`Webhook Error: ${err.message}`);
+    }
+
+    // পেমেন্ট সফল হলে ডাটাবেজ আপডেট করুন
+    if (event.type === 'checkout.session.completed') {
+        const session = event.data.object;
+
+        await Order.findOneAndUpdate(
+            { stripeSessionId: session.id },
+            { status: 'paid' }
+        );
+        console.log('Order marked as Paid!');
+    }
+
+    res.json({ received: true });
+});
+
 app.use(express.json());
 
 
@@ -35,9 +64,10 @@ async function run() {
         // register api
         app.post('/users', async (req, res) => {
             const email = req.body.email;
+            const password = req.body.password;
             const user = req.body;
             console.log(user)
-            const existingUser = await userCollections.findOne({ email });
+            const existingUser = await userCollections.findOne({ email, password });
             if (!existingUser) {
                 // Create new user
                 await userCollections.insertOne(user);
@@ -68,6 +98,24 @@ async function run() {
                 res.status(500).send({ message: 'Failed to add products. Please try again later.' });
             }
         })
+
+        // payment intent api
+        app.post('/create-payment-intent', async (req, res) => {
+            const amount = req.body.amount;
+            try {
+                const paymentIntent = await stripe.paymentIntents.create({
+                    amount: amount * 100, // Amount in cents
+                    currency: 'usd',
+                    payment_method_types: ['card'],
+                });
+
+                res.send({
+                    clientSecret: paymentIntent.client_secret,
+                });
+            } catch (error) {
+                res.status(400).send({ error: error.message });
+            }
+        });
 
 
         // Send a ping to confirm a successful connection
